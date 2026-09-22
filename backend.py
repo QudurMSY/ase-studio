@@ -59,8 +59,8 @@ GEM5_VARIANT = "opt"
 OFFICIAL_GEM5_REPOSITORY = "github.com/cad-polito-it/gem5"
 REQUIRED_BRANCHES_FILE = ROOT / "ase_studio_branches.json"
 
-ENABLE_MEMORY_CONFIGURATION = False
-ENABLE_MULTI_ISSUE_CPU = False
+ENABLE_MEMORY_CONFIGURATION = True
+ENABLE_MULTI_ISSUE_CPU = True
 
 LOCAL_SETUP_PATHSPEC = "setup_default*"
 LOCAL_PROGRAM_PATHSPEC = "programs/**"
@@ -4125,6 +4125,78 @@ def repository_current_branch(repository):
     return branch.strip() or "(detached HEAD)"
 
 
+def filesystem_git_checkout(path):
+    """Find the checkout containing *path* without invoking Git."""
+    path = Path(path).resolve()
+    candidates = ((path, *path.parents) if path.is_dir()
+                  else (path.parent, *path.parents))
+    for candidate in candidates:
+        marker = candidate / ".git"
+        if marker.is_dir() or marker.is_file():
+            return candidate
+    return None
+
+
+def git_metadata_path(repository):
+    """Resolve a checkout's .git directory using filesystem operations only."""
+    marker = Path(repository) / ".git"
+    if marker.is_dir():
+        return marker
+    if not marker.is_file():
+        return None
+    try:
+        declaration = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    prefix = "gitdir:"
+    if not declaration.lower().startswith(prefix):
+        return None
+    metadata = Path(declaration[len(prefix):].strip())
+    if not metadata.is_absolute():
+        metadata = marker.parent / metadata
+    return metadata.resolve()
+
+
+def gem5_checkout_is_writable(repository, build_dir):
+    """Return whether gem5 can be fetched, updated, and rebuilt by this user."""
+    metadata = git_metadata_path(repository)
+    return bool(
+        metadata is not None
+        and metadata.is_dir()
+        and os.access(repository, os.W_OK)
+        and os.access(metadata, os.W_OK)
+        and os.access(build_dir, os.W_OK)
+    )
+
+
+def configured_gem5_location(values=None):
+    """Locate the configured build and checkout without running Git."""
+    if values is None:
+        values = setup_environment()
+        values.update(environment_overrides())
+    try:
+        build_dir = resolve_environment_path(values["GEM5_INSTALLATION_PATH"])
+        executable = build_dir / GEM5_ISA / f"gem5.{GEM5_VARIANT}"
+    except (KeyError, ValueError) as error:
+        return {"error": f"gem5 update checking is unavailable: {error}"}
+    repository = filesystem_git_checkout(build_dir)
+    source_dir = repository if repository is not None else build_dir.parent
+    return {
+        "buildDir": str(build_dir),
+        "executable": str(executable),
+        "sourceDir": str(source_dir),
+        "repository": str(repository) if repository is not None else "",
+        "filesystemWritable": bool(
+            source_dir.is_dir()
+            and build_dir.is_dir()
+            and os.access(source_dir, os.W_OK)
+            and os.access(build_dir, os.W_OK)
+        ),
+        "writable": (gem5_checkout_is_writable(repository, build_dir)
+                     if repository is not None else False),
+    }
+
+
 def require_startup_repositories():
     """Block startup when simulator/gem5 are not on deployment branches."""
     required = required_repository_branches()
@@ -4139,24 +4211,35 @@ def require_startup_repositories():
 
     values = setup_environment()
     values.update(environment_overrides())
-    try:
-        build_dir = resolve_environment_path(values["GEM5_INSTALLATION_PATH"])
-    except (KeyError, ValueError) as error:
-        problems.append(f"The configured gem5 path is invalid: {error}")
-    else:
-        ok, top = git_run(["rev-parse", "--show-toplevel"], cwd=build_dir)
-        if not ok:
+    location = configured_gem5_location(values)
+    if location.get("error"):
+        problems.append(f"The configured gem5 path is invalid: {location['error']}")
+    elif not Path(location["buildDir"]).is_dir():
+        problems.append(
+            f"The configured gem5 build directory does not exist: {location['buildDir']}")
+    elif location["filesystemWritable"]:
+        if not location["repository"]:
             problems.append(
-                f"The configured gem5 build is not inside a Git checkout: {build_dir}")
-        else:
-            gem5_root = Path(top).resolve()
-            gem5_branch = repository_current_branch(gem5_root)
-            if gem5_branch is None:
-                problems.append(f"gem5 is not a Git checkout: {gem5_root}")
-            elif gem5_branch != required["gem5"]:
+                "The configured gem5 build is not inside a Git checkout: "
+                f"{location['buildDir']}")
+        elif location["writable"]:
+            gem5_root = Path(location["repository"])
+            ok, top = git_run(["rev-parse", "--show-toplevel"], cwd=gem5_root)
+            if not ok:
                 problems.append(
-                    f"gem5 requires branch '{required['gem5']}', "
-                    f"but '{gem5_branch}' is checked out.")
+                    f"The configured gem5 source is not a Git checkout: {gem5_root}")
+            else:
+                actual_root = Path(top).resolve()
+                gem5_branch = repository_current_branch(actual_root)
+                if gem5_branch is None:
+                    problems.append(f"gem5 is not a Git checkout: {actual_root}")
+                elif gem5_branch != required["gem5"]:
+                    problems.append(
+                        f"gem5 requires branch '{required['gem5']}', "
+                        f"but '{gem5_branch}' is checked out.")
+    # Shared /opt deployments are maintained by an administrator. Students can
+    # run their gem5 binary, but startup does not inspect a read-only checkout.
+    # Writable VM/local installs take the branch-validation path above.
     if problems:
         detail = "\n".join(f"- {problem}" for problem in problems)
         fail(
@@ -4179,27 +4262,35 @@ def normalized_git_remote(value):
 
 def configured_gem5_checkout(values=None):
     """Describe the Git checkout owning the configured gem5 build."""
-    if values is None:
-        values = setup_environment()
-        values.update(environment_overrides())
-    try:
-        build_dir = resolve_environment_path(values["GEM5_INSTALLATION_PATH"])
-        executable = build_dir / GEM5_ISA / f"gem5.{GEM5_VARIANT}"
-    except (KeyError, ValueError) as error:
+    location = configured_gem5_location(values)
+    if location.get("error"):
         return {"managed": False,
-                "message": f"gem5 update checking is unavailable: {error}"}
+                "message": location["error"]}
+    build_dir = Path(location["buildDir"])
+    executable = Path(location["executable"])
     if not executable.is_file():
         return {"managed": False, "buildDir": str(build_dir),
                 "executable": str(executable),
                 "message": ("The configured gem5 build does not exist; "
                             "updates cannot be checked.")}
-    ok, top = git_run(["rev-parse", "--show-toplevel"], cwd=build_dir)
-    if not ok:
+    if not location["repository"]:
         return {"managed": False, "buildDir": str(build_dir),
                 "executable": str(executable),
                 "message": ("The build works, but it is not inside a Git "
                             "checkout; gem5 updates cannot be checked.")}
-    repository = Path(top).resolve()
+    repository = Path(location["repository"])
+    if not location["writable"]:
+        return {"managed": False, "path": str(repository),
+                "buildDir": str(build_dir), "executable": str(executable),
+                "message": ("The gem5 checkout is managed by the system and "
+                            "is not writable by the current user; update "
+                            "checking was skipped.")}
+    ok, top = git_run(["rev-parse", "--show-toplevel"], cwd=repository)
+    if not ok or Path(top).resolve() != repository:
+        return {"managed": False, "path": str(repository),
+                "buildDir": str(build_dir), "executable": str(executable),
+                "message": ("The build works, but its source directory is not "
+                            "a valid Git checkout; updates cannot be checked.")}
     ok, origin = git_run(["remote", "get-url", "origin"], cwd=repository)
     if not ok or normalized_git_remote(origin) != OFFICIAL_GEM5_REPOSITORY:
         shown = origin if ok and origin else "no origin remote"
@@ -4208,13 +4299,6 @@ def configured_gem5_checkout(values=None):
                 "message": ("The build is not connected to the official "
                             f"cad-polito-it/gem5 repository ({shown}); "
                             "updates cannot be checked.")}
-    if not os.access(repository, os.W_OK) or not os.access(build_dir, os.W_OK):
-        return {"managed": False, "path": str(repository),
-                "buildDir": str(build_dir), "executable": str(executable),
-                "origin": origin,
-                "message": ("The official gem5 checkout or its build directory "
-                            "is not writable by the current user; updates and "
-                            "automatic rebuilding are unavailable.")}
     try:
         target = str(executable.relative_to(repository))
     except ValueError:
