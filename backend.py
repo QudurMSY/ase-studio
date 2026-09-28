@@ -4,6 +4,8 @@
 """Small localhost-only backend for the experimental ASE Studio."""
 from __future__ import annotations
 
+import base64
+import binascii
 import csv
 import hashlib
 import io
@@ -54,6 +56,10 @@ PORTABLE_ENVIRONMENT_VARIABLES = {
 ASSIGNMENT_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 STUDIO_API_VERSION = 2
 PIPELINE_DISPLAY_CYCLE_LIMIT = 3000
+MAX_SUBMISSION_PROJECTS = 20
+MAX_SUBMISSION_ATTACHMENTS = 20
+MAX_SUBMISSION_ATTACHMENT_BYTES = 25 * 1024 * 1024
+MAX_SUBMISSION_TOTAL_ATTACHMENT_BYTES = 100 * 1024 * 1024
 GEM5_ISA = "RISCV"
 GEM5_VARIANT = "opt"
 OFFICIAL_GEM5_REPOSITORY = "github.com/cad-polito-it/gem5"
@@ -4027,26 +4033,149 @@ def submission_archive_stem(assignment):
     return stem
 
 
-def create_submission(name, assignment, source, expand_loops=False):
-    """Build, simulate, and package source plus the complete pipeline CSV."""
+def submission_archive_component(name, index):
+    """Return a portable, collision-resistant directory name for a ZIP."""
+    safe_name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")
+    return f"{index:02d}-{safe_name or 'project'}"
+
+
+def decode_submission_attachments(attachments):
+    """Validate and decode browser-provided files before creating the ZIP."""
+    if attachments is None:
+        return []
+    if not isinstance(attachments, list):
+        fail("Invalid submission attachments.")
+    if len(attachments) > MAX_SUBMISSION_ATTACHMENTS:
+        fail(f"Choose no more than {MAX_SUBMISSION_ATTACHMENTS} additional files.")
+    decoded = []
+    seen_names = set()
+    total_size = 0
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            fail("Invalid submission attachment.")
+        name = attachment.get("name")
+        if (not isinstance(name, str) or not name or name in {".", ".."}
+                or "/" in name or "\\" in name or "\0" in name
+                or any(ord(character) < 32 or ord(character) == 127
+                       for character in name)):
+            fail("Additional filenames must be plain filenames without folders.")
+        if len(os.fsencode(name)) > 255:
+            fail(f"The additional filename '{name}' is too long.")
+        folded_name = name.casefold()
+        if folded_name in seen_names:
+            fail(f"The additional filename '{name}' is duplicated.")
+        seen_names.add(folded_name)
+        content = attachment.get("contentBase64")
+        if not isinstance(content, str):
+            fail(f"The additional file '{name}' has invalid content.")
+        try:
+            file_bytes = base64.b64decode(content, validate=True)
+        except (binascii.Error, ValueError, UnicodeEncodeError):
+            fail(f"The additional file '{name}' could not be decoded.")
+        if len(file_bytes) > MAX_SUBMISSION_ATTACHMENT_BYTES:
+            fail(f"The additional file '{name}' exceeds the 25 MiB limit.")
+        total_size += len(file_bytes)
+        if total_size > MAX_SUBMISSION_TOTAL_ATTACHMENT_BYTES:
+            fail("Additional files exceed the combined 100 MiB limit.")
+        mime_type = attachment.get("mimeType") or "application/octet-stream"
+        if not isinstance(mime_type, str) or len(mime_type) > 255:
+            mime_type = "application/octet-stream"
+        decoded.append({"name": name, "bytes": file_bytes,
+                        "mimeType": mime_type})
+    return decoded
+
+
+def create_submission(projects, assignment, attachments=None, expand_loops=False):
+    """Build, simulate, and package selected projects and supporting files."""
     if not isinstance(assignment, str) or not ASSIGNMENT_NAME.fullmatch(assignment):
         fail("Assignment names may contain letters, digits, '_' and '-'.")
     if not isinstance(expand_loops, bool):
         fail("Invalid loop export option.")
-    folder = project_dir(name)
-    source_path = save_source(folder, source)
-    built = build(name)
-    if not built["ok"]:
-        return {"ok": False, "phase": "build", "output": built["output"],
-                "advancedOutput": built["advancedOutput"]}
-    simulated = simulate(name)
-    if not simulated["ok"]:
-        return {"ok": False, "phase": "simulate",
-                "output": built["output"] + "\n" + simulated["output"],
-                "advancedOutput": (built["advancedOutput"] + "\n"
-                                   + simulated["advancedOutput"])}
-    data = pipeline(name)
-    csv_name = f"{name}-pipeline.csv"
+    if not isinstance(projects, list) or not projects:
+        fail("Select at least one project for the submission.")
+    if len(projects) > MAX_SUBMISSION_PROJECTS:
+        fail(f"Select no more than {MAX_SUBMISSION_PROJECTS} projects.")
+
+    selected_projects = []
+    selected_names = set()
+    for entry in projects:
+        if not isinstance(entry, dict):
+            fail("Invalid submission project.")
+        name = validate_project_name(entry.get("name"))
+        if name in selected_names:
+            fail(f"The project '{name}' was selected more than once.")
+        selected_names.add(name)
+        source = entry.get("source")
+        if source is not None and not isinstance(source, str):
+            fail(f"The source for project '{name}' is invalid.")
+        selected_projects.append({"name": name, "source": source})
+
+    decoded_attachments = decode_submission_attachments(attachments)
+    archive_entries = []
+    manifest_projects = []
+    manifest_attachments = []
+    manifest_files = []
+    normal_sections = []
+    advanced_sections = []
+
+    def add_archive_file(archive_path, content):
+        digest = hashlib.sha256(content).hexdigest()
+        archive_entries.append((archive_path, content))
+        record = {"path": archive_path, "hash": digest, "size": len(content)}
+        manifest_files.append(record)
+        return record
+
+    for index, entry in enumerate(selected_projects, start=1):
+        name = entry["name"]
+        folder = project_dir(name)
+        source_path = (save_source(folder, entry["source"])
+                       if entry["source"] is not None else source_file(folder))
+        built = build(name)
+        normal_sections.append(f"[{name}]\n{built['output']}")
+        advanced_sections.append(f"[{name}]\n{built['advancedOutput']}")
+        if not built["ok"]:
+            return {"ok": False, "phase": "build", "project": name,
+                    "output": "\n\n".join(normal_sections),
+                    "advancedOutput": "\n\n".join(advanced_sections)}
+        simulated = simulate(name)
+        normal_sections[-1] += "\n" + simulated["output"]
+        advanced_sections[-1] += "\n" + simulated["advancedOutput"]
+        if not simulated["ok"]:
+            return {"ok": False, "phase": "simulate", "project": name,
+                    "output": "\n\n".join(normal_sections),
+                    "advancedOutput": "\n\n".join(advanced_sections)}
+
+        data = pipeline(name)
+        project_root = f"projects/{submission_archive_component(name, index)}"
+        archive_source_name = re.sub(
+            r"[^A-Za-z0-9._ -]+", "_", source_path.name).strip(" .") or "program.s"
+        source_record = add_archive_file(
+            f"{project_root}/{archive_source_name}", source_path.read_bytes())
+        pipeline_record = add_archive_file(
+            f"{project_root}/pipeline.csv",
+            pipeline_csv(data, expand_loops).encode("utf-8"))
+        config_record = add_archive_file(
+            f"{project_root}/ase-studio-config.json",
+            (json.dumps(project_config(folder), indent=2, sort_keys=True)
+             + "\n").encode("utf-8"))
+        manifest_projects.append({
+            "name": name,
+            "archivePath": project_root,
+            "source": source_record["path"],
+            "pipeline": pipeline_record["path"],
+            "configuration": config_record["path"],
+        })
+
+    for attachment in decoded_attachments:
+        archive_path = f"attachments/{attachment['name']}"
+        record = add_archive_file(archive_path, attachment["bytes"])
+        manifest_attachments.append({
+            "name": attachment["name"],
+            "path": archive_path,
+            "mimeType": attachment["mimeType"],
+            "size": record["size"],
+        })
+
     submission_root = ROOT / "submissions"
     submission_root.mkdir(exist_ok=True)
     destination = (submission_root / assignment).resolve()
@@ -4055,42 +4184,75 @@ def create_submission(name, assignment, source, expand_loops=False):
     destination.mkdir(parents=True, exist_ok=True)
     archive_stem = submission_archive_stem(assignment)
     archive = destination / f"{archive_stem}.zip"
-    source_bytes = source_path.read_bytes()
-    csv_bytes = pipeline_csv(data, expand_loops).encode("utf-8")
-    source_hash = hashlib.sha256(source_bytes).hexdigest()
-    csv_hash = hashlib.sha256(csv_bytes).hexdigest()
     submitted_at = (datetime.now(timezone.utc).isoformat(timespec="seconds")
                     .replace("+00:00", "Z"))
+    canonical_files = json.dumps(
+        sorted(manifest_files, key=lambda item: item["path"]),
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    content_hash = hashlib.sha256(canonical_files).hexdigest()
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "generatedBy": f"ASE Studio {STUDIO_VERSION}",
         "submittedAt": submitted_at,
         "assignment": assignment,
         "submissionName": archive_stem,
-        "project": name,
         "hashAlgorithm": "SHA-256",
-        "files": [
-            {"path": source_path.name, "hash": source_hash,
-             "size": len(source_bytes)},
-            {"path": csv_name, "hash": csv_hash, "size": len(csv_bytes)},
-        ],
-        "contenthash": hashlib.sha256(
-            f"{source_path.name}\0{source_hash}\0{csv_name}\0{csv_hash}".encode("utf-8")
-        ).hexdigest(),
+        "projects": manifest_projects,
+        "attachments": manifest_attachments,
+        "files": manifest_files,
+        "contentHash": content_hash,
+        "contenthash": content_hash,
     }
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-        bundle.writestr(source_path.name, source_bytes)
-        bundle.writestr(csv_name, csv_bytes)
+        for archive_path, content in archive_entries:
+            bundle.writestr(archive_path, content)
         bundle.writestr(".ase-submission.json",
                         json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
     relative_archive = archive.relative_to(ROOT)
-    normal = (built["output"] + "\n" + simulated["output"]
-              + f"\nSubmission ready: {relative_archive}\n"
-              + f"Contains {source_path.name} and {csv_name}.")
-    advanced = (built["advancedOutput"] + "\n" + simulated["advancedOutput"]
-                + f"\nCreated {relative_archive}.")
-    return {"ok": True, "phase": "submission", "output": normal,
-            "advancedOutput": advanced, "archive": str(relative_archive)}
+    attachment_summary = (f" and {len(decoded_attachments)} additional file(s)"
+                          if decoded_attachments else "")
+    normal_sections.append(
+        f"Submission ready: {relative_archive}\n"
+        f"Contains {len(selected_projects)} project(s){attachment_summary}.")
+    advanced_sections.append(f"Created {relative_archive}.")
+    return {"ok": True, "phase": "submission",
+            "output": "\n\n".join(normal_sections),
+            "advancedOutput": "\n\n".join(advanced_sections),
+            "archive": str(relative_archive),
+            "projects": [entry["name"] for entry in selected_projects]}
+
+
+def reveal_submission_folder(archive_path):
+    """Open the file manager at a completed submission's directory."""
+    if not isinstance(archive_path, str) or not archive_path:
+        fail("The submission archive path is missing.")
+    submissions_root = (ROOT / "submissions").resolve()
+    archive = (ROOT / archive_path).resolve()
+    try:
+        archive.relative_to(submissions_root)
+    except ValueError:
+        fail("Invalid submission archive path.")
+    if not archive.is_file() or archive.suffix.lower() != ".zip":
+        fail("The submission ZIP could not be found.", 404)
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        fail("A Linux desktop session is required to open the submission folder.")
+    opener = shutil.which("xdg-open")
+    if not opener:
+        fail("The system file manager opener (xdg-open) is not installed.", 500)
+    try:
+        subprocess.Popen(
+            [opener, str(archive.parent)],
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as error:
+        fail(f"The submission folder could not be opened: {error}", 500)
+    return {"ok": True, "folder": str(archive.parent.relative_to(ROOT))}
 
 
 def git_run(args, timeout=20, cwd=ROOT):
@@ -4115,7 +4277,7 @@ def required_repository_branches():
     if not isinstance(values, dict):
         fail("Required-branch configuration must be a JSON object.", 500)
     branches = {}
-    for key in ("simulator", "gem5"):
+    for key in ("simulator", "studio", "gem5"):
         branch = values.get(key)
         if (not isinstance(branch, str) or not branch.strip()
                 or branch.startswith("-") or "\0" in branch
@@ -4130,6 +4292,54 @@ def repository_current_branch(repository):
     if not ok:
         return None
     return branch.strip() or "(detached HEAD)"
+
+
+def ensure_repository_branch(repository, label, required_branch):
+    """Switch a checkout to its deployment branch without discarding work."""
+    repository = Path(repository).resolve()
+    current_branch = repository_current_branch(repository)
+    if current_branch is None:
+        return f"{label} is not a Git checkout: {repository}", False
+    if current_branch == required_branch:
+        return None, False
+
+    local_ref = f"refs/heads/{required_branch}"
+    remote_ref = f"refs/remotes/origin/{required_branch}"
+    local_exists, _ = git_run(
+        ["show-ref", "--verify", "--quiet", local_ref], cwd=repository)
+    if not local_exists:
+        remote_exists, _ = git_run(
+            ["show-ref", "--verify", "--quiet", remote_ref], cwd=repository)
+        if not remote_exists:
+            refspec = f"+refs/heads/{required_branch}:{remote_ref}"
+            fetched, fetch_output = git_run(
+                ["fetch", "origin", refspec], timeout=60, cwd=repository)
+            if not fetched:
+                detail = fetch_output.splitlines()[-1] if fetch_output else "fetch failed"
+                return (f"{label} requires branch '{required_branch}', but ASE Studio "
+                        f"could not fetch it from origin: {detail}"), False
+        # A single-branch clone may have the remote ref without a matching
+        # remote fetch rule, so create from the explicit ref without --track.
+        # ASE Studio's updater always names origin and the branch explicitly.
+        command = ["switch", "-c", required_branch,
+                   f"origin/{required_branch}"]
+    else:
+        command = ["switch", required_branch]
+
+    switched, switch_output = git_run(command, timeout=60, cwd=repository)
+    if not switched:
+        detail = (switch_output.splitlines()[-1]
+                  if switch_output else "Git refused the branch switch")
+        return (
+            f"{label} requires branch '{required_branch}', but '{current_branch}' "
+            f"is checked out and the automatic switch failed: {detail}. "
+            "Commit or stash conflicting tracked changes, then start ASE Studio again."
+        ), False
+    actual_branch = repository_current_branch(repository)
+    if actual_branch != required_branch:
+        return (f"{label} did not reach required branch '{required_branch}' "
+                f"after switching; current branch is '{actual_branch}'."), False
+    return None, True
 
 
 def filesystem_git_checkout(path):
@@ -4205,16 +4415,20 @@ def configured_gem5_location(values=None):
 
 
 def require_startup_repositories():
-    """Block startup when simulator/gem5 are not on deployment branches."""
+    """Select supported parent/Studio branches and validate the gem5 branch."""
     required = required_repository_branches()
     problems = []
-    parent_branch = repository_current_branch(ROOT)
-    if parent_branch is None:
-        problems.append(f"Simulator is not a Git checkout: {ROOT}")
-    elif parent_branch != required["simulator"]:
-        problems.append(
-            f"Simulator requires branch '{required['simulator']}', "
-            f"but '{parent_branch}' is checked out.")
+    switched_labels = []
+
+    for repository, label, branch in (
+            (ROOT, "Simulator", required["simulator"]),
+            (STUDIO_ROOT, "ASE Studio", required["studio"])):
+        problem, switched = ensure_repository_branch(
+            repository, label, branch)
+        if problem:
+            problems.append(problem)
+        elif switched:
+            switched_labels.append(f"{label} -> {branch}")
 
     values = setup_environment()
     values.update(environment_overrides())
@@ -4256,6 +4470,9 @@ def require_startup_repositories():
             f"Change required branch names in {REQUIRED_BRANCHES_FILE}.",
             500,
         )
+    if switched_labels:
+        print("ASE Studio selected required branches: "
+              + ", ".join(switched_labels), flush=True)
     return required
 
 
@@ -4792,9 +5009,16 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json(pull_update(discard))
             if self.path == "/api/open-with":
                 return self.send_json(open_with_editor(data.get("name")))
+            if self.path == "/api/submission/reveal":
+                return self.send_json(reveal_submission_folder(data.get("archive")))
             if self.path == "/api/submit":
+                projects = data.get("projects")
+                # Retain compatibility with clients from before submission v2.
+                if projects is None and data.get("name") is not None:
+                    projects = [{"name": data.get("name"),
+                                 "source": data.get("text")}]
                 return self.send_json(create_submission(
-                    data.get("name"), data.get("assignment"), data.get("text"),
+                    projects, data.get("assignment"), data.get("attachments"),
                     data.get("expandLoops", False)))
             if self.path == "/api/shutdown":
                 self.send_json({"ok": True, "output": "ASE Studio stopped."})

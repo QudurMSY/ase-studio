@@ -44,7 +44,23 @@
   <small>© Politecnico di Torino 2026</small>
 </div></dialog>
 <dialog id="message-dialog"><form id="message-form"><h2 id="message-title">ASE Studio</h2><p id="message-text"></p><label id="message-input-wrap" hidden><span id="message-input-label"></span><input id="message-input" type="text" autocomplete="off"></label><div class="dialog-actions"><button type="button" id="message-cancel">Cancel</button><button type="button" id="message-alternate">Discard</button><button type="submit" id="message-confirm" class="primary">OK</button></div></form></dialog>
-<dialog id="environment-dialog"><form id="environment-form">
+<dialog id="submission-dialog"><form id="submission-form">
+  <h2>Prepare submission</h2>
+  <p>Choose the ASE projects and optional supporting files to include in one ZIP archive.</p>
+  <label class="submission-assignment">Assignment name<input id="submission-assignment" type="text" placeholder="lab_1" pattern="[A-Za-z][A-Za-z0-9_-]{0,63}" required></label>
+  <fieldset><legend>Projects</legend>
+    <div class="submission-project-tools"><small>Each selected project is built and simulated with its saved CPU configuration.</small><span><button id="submission-select-all" type="button">Select all</button><button id="submission-select-none" type="button">Clear</button></span></div>
+    <div id="submission-projects" class="submission-projects"></div>
+  </fieldset>
+  <fieldset><legend>Additional files</legend>
+    <label class="submission-file-picker">Attach PDFs or other exercise files<input id="submission-files" type="file" multiple></label>
+    <small>Up to 20 files, 25 MiB each and 100 MiB in total.</small>
+    <div id="submission-file-list" class="submission-file-list">No additional files selected.</div>
+  </fieldset>
+  <label class="check"><input id="submission-expand-loops" type="checkbox" checked> Export repeated loop iterations as separate pipeline rows</label>
+  <div class="dialog-actions"><button type="button" id="cancel-submission">Cancel</button><button type="submit" id="submission-confirm" class="primary">Create submission</button></div>
+</form></dialog>
+<dialog id="environment-dialog"><form id="environment-form" novalidate>
   <h2>Settings</h2>
   <p>Set one RISC-V toolchain directory; ASE Studio finds its matching GCC and objdump automatically. Paths may use <code>$HOME</code>, <code>$USER</code>, or <code>$ASE_STUDIO_ROOT</code>.</p>
   <div class="environment-fields">

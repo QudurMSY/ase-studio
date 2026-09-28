@@ -554,25 +554,120 @@ async function synchronizeExternalSource() {
   }
 }
 
+function formatSubmissionFileSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MiB";
+}
+
+function renderSubmissionFiles() {
+  const files = [...($("#submission-files").files || [])];
+  $("#submission-file-list").innerHTML = files.length
+    ? files.map(file => '<div class="submission-file-entry"><strong>' + escapeHtml(file.name) + "</strong><span>" + formatSubmissionFileSize(file.size) + "</span></div>").join("")
+    : "No additional files selected.";
+}
+
+function submissionAttachment(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Could not read " + file.name + "."));
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const separator = result.indexOf(",");
+      if (separator < 0) {
+        reject(new Error("Could not encode " + file.name + "."));
+        return;
+      }
+      resolve({
+        name: file.name,
+        mimeType: file.type || "application/octet-stream",
+        contentBase64: result.slice(separator + 1)
+      });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 async function submitAssignment() {
   if (!current) return;
-  const assignment = await actionDialog({
-    title: "Submit assignment",
-    message: "Enter the assignment name. The source and complete pipeline CSV will be packaged together.",
-    inputLabel: "Assignment name (for example lab_1)",
-    confirmLabel: "Submit",
-    cancelLabel: "Cancel"
-  });
-  if (!assignment) return;
+  try {
+    const data = await api("/api/projects");
+    $("#submission-projects").innerHTML = data.projects.map(name =>
+      '<label class="submission-project"><input type="checkbox" data-submission-project value="' + escapeHtml(name) + '" ' + (name === current.name ? "checked" : "") + '><span title="' + escapeHtml(name) + '">' + escapeHtml(name) + "</span></label>"
+    ).join("");
+    $("#submission-assignment").value = "";
+    $("#submission-files").value = "";
+    $("#submission-expand-loops").checked = $("#expand-loops").checked;
+    renderSubmissionFiles();
+    $("#submission-dialog").showModal();
+    $("#submission-assignment").focus();
+  } catch (error) {
+    await showActionMessage("Prepare submission", error.message);
+  }
+}
+
+async function prepareSubmission() {
+  if (!current) return;
+  const assignment = $("#submission-assignment").value.trim();
   if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(assignment)) {
     await showActionMessage("Invalid assignment name",
       "Use a name beginning with a letter and containing only letters, digits, '_' or '-'.");
     return;
   }
+  const selectedNames = [...document.querySelectorAll("[data-submission-project]:checked")]
+    .map(input => input.value);
+  if (!selectedNames.length) {
+    await showActionMessage("Prepare submission", "Select at least one project.");
+    return;
+  }
+  const files = [...($("#submission-files").files || [])];
+  if (files.length > 20) {
+    await showActionMessage("Prepare submission", "Choose no more than 20 additional files.");
+    return;
+  }
+  const tooLarge = files.find(file => file.size > 25 * 1024 * 1024);
+  if (tooLarge) {
+    await showActionMessage("Prepare submission", tooLarge.name + " exceeds the 25 MiB limit.");
+    return;
+  }
+  const totalSize = files.reduce((total, file) => total + file.size, 0);
+  if (totalSize > 100 * 1024 * 1024) {
+    await showActionMessage("Prepare submission", "Additional files exceed the combined 100 MiB limit.");
+    return;
+  }
+
+  const confirmButton = $("#submission-confirm");
+  const cancelButton = $("#cancel-submission");
+  confirmButton.disabled = true;
+  cancelButton.disabled = true;
+  confirmButton.textContent = "Reading files…";
+  let attachments;
+  try {
+    attachments = await Promise.all(files.map(submissionAttachment));
+  } catch (error) {
+    confirmButton.disabled = false;
+    cancelButton.disabled = false;
+    confirmButton.textContent = "Create submission";
+    await showActionMessage("Prepare submission", error.message);
+    return;
+  }
+
+  const submittedProjectName = current.name;
+  const submittedSource = $("#body").value;
+  const currentWasSelected = selectedNames.includes(submittedProjectName);
+  const projects = selectedNames.map(name => ({
+    name,
+    source: name === submittedProjectName ? submittedSource : null
+  }));
+  $("#submission-dialog").close();
+  confirmButton.disabled = false;
+  cancelButton.disabled = false;
+  confirmButton.textContent = "Create submission";
+
   const controls = ["#submit", "#run", "#step", "#reset", "#configure"];
   controls.forEach(selector => { $(selector).disabled = true; });
   $("#submit").textContent = "Submitting…";
-  lastNormalLog = "Building, simulating, and preparing the submission…";
+  lastNormalLog = "Building and simulating " + projects.length + " selected project(s)…";
   lastAdvancedLog = lastNormalLog;
   updateLog();
   showTab("output");
@@ -581,19 +676,35 @@ async function submitAssignment() {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
-        name: current.name,
         assignment,
-        text: $("#body").value,
-        expandLoops: $("#expand-loops").checked
+        projects,
+        attachments,
+        expandLoops: $("#submission-expand-loops").checked
       })
     });
-    savedSource = $("#body").value;
-    sourceDirty = false;
-    updateDirtyIndicator();
+    if (currentWasSelected && current?.name === submittedProjectName) {
+      savedSource = submittedSource;
+      sourceDirty = $("#body").value !== submittedSource;
+      updateDirtyIndicator();
+    }
     lastNormalLog = result.output;
     lastAdvancedLog = result.advancedOutput || result.output;
     updateLog();
-    if (result.ok) {
+    if (result.ok && result.archive) {
+      try {
+        await api("/api/submission/reveal", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({archive: result.archive})
+        });
+      } catch (revealError) {
+        const warning = "The submission was created, but its folder could not be opened: " + revealError.message;
+        lastNormalLog += "\n\n" + warning;
+        lastAdvancedLog += "\n\n" + warning;
+        updateLog();
+      }
+    }
+    if (result.ok && currentWasSelected && current?.name === submittedProjectName) {
       const trace = await api("/api/pipeline?name=" + encodeURIComponent(current.name));
       appendSimulationReports(trace);
       current.dataSymbols = trace.dataSymbols || [];
@@ -604,9 +715,9 @@ async function submitAssignment() {
         playbackCycle = null;
         stepMode = false;
         $("#step").textContent = "Run Step";
-        const notice = `Pipeline not displayed: ${trace.cycles} cycles exceeds the ${trace.limit}-cycle limit.\nExecuted instructions: ${trace.instructions} · Stalls: ${trace.stalls} · CPI: ${trace.cpi}\nFull pipeline CSV: ${trace.csvPath}`;
-        lastNormalLog += `\n\n${notice}`;
-        lastAdvancedLog += `\n\n${notice}`;
+        const notice = "Pipeline not displayed: " + trace.cycles + " cycles exceeds the " + trace.limit + "-cycle limit.\nExecuted instructions: " + trace.instructions + " · Stalls: " + trace.stalls + " · CPI: " + trace.cpi + "\nFull pipeline CSV: " + trace.csvPath;
+        lastNormalLog += "\n\n" + notice;
+        lastAdvancedLog += "\n\n" + notice;
         updateLog();
         renderPipeline();
         showTab("output");
@@ -1806,6 +1917,21 @@ $("#cpu-model").onchange = () => {
   updateForwardingControl();
 };
 $("#memory-mode").onchange = updateMemoryControls;
+$("#cancel-submission").onclick = () => $("#submission-dialog").close();
+$("#submission-dialog").addEventListener("cancel", event => {
+  if ($("#submission-confirm").disabled) event.preventDefault();
+});
+$("#submission-files").onchange = renderSubmissionFiles;
+$("#submission-select-all").onclick = () => {
+  document.querySelectorAll("[data-submission-project]").forEach(input => { input.checked = true; });
+};
+$("#submission-select-none").onclick = () => {
+  document.querySelectorAll("[data-submission-project]").forEach(input => { input.checked = false; });
+};
+$("#submission-form").onsubmit = event => {
+  event.preventDefault();
+  prepareSubmission();
+};
 $("#cancel-config").onclick = () => $("#cpu-dialog").close();
 $("#cancel-environment").onclick = () => $("#environment-dialog").close();
 $("#import-environment").onclick = () => $("#environment-import-file").click();
@@ -1895,6 +2021,16 @@ $("#cpu-form").onsubmit = async event => {
 $("#environment-form").onsubmit = async event => {
   event.preventDefault();
   const values = environmentFormValues();
+  const cycleLimitText = values.PIPELINE_DISPLAY_CYCLE_LIMIT.trim();
+  const cycleLimit = Number(cycleLimitText);
+  if (!/^[0-9]+$/.test(cycleLimitText)
+      || !Number.isInteger(cycleLimit) || cycleLimit < 100 || cycleLimit > 20000) {
+    const message = "Maximum visible pipeline cycles must be a whole number from 100 to 20,000. Higher values can use excessive browser memory; larger traces are saved automatically as a complete CSV instead.";
+    setEnvironmentValidation("PIPELINE_DISPLAY_CYCLE_LIMIT", "invalid", message);
+    await showActionMessage("Maximum pipeline cycles", message);
+    $("#env-pipeline-cycle-limit").focus();
+    return;
+  }
   try {
     const settings = await api("/api/environment", {
       method: "POST",

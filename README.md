@@ -29,7 +29,7 @@ ASE Studio is designed to live at `ase_studio/` as a Git submodule of the
 simulator repository. Clone the parent repository with its submodules:
 
 ```bash
-git clone --branch ase_studio --recurse-submodules https://github.com/cad-polito-it/ase_riscv_gem5_sim.git
+git clone --branch main --recurse-submodules https://github.com/cad-polito-it/ase_riscv_gem5_sim.git
 cd ase_riscv_gem5_sim
 ```
 
