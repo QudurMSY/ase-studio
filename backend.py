@@ -4435,6 +4435,35 @@ def configured_gem5_location(values=None):
     }
 
 
+def ensure_configured_gem5_branch(location, required_branch):
+    """Select writable gem5, or request action for a shared checkout."""
+    if not location.get("repository"):
+        if location.get("filesystemWritable"):
+            return ("The configured gem5 build is not inside a Git checkout: "
+                    f"{location['buildDir']}"), False
+        # A shared binary-only installation has no branch metadata to inspect.
+        return None, False
+
+    gem5_root = Path(location["repository"])
+    ok, top = git_run(["rev-parse", "--show-toplevel"], cwd=gem5_root)
+    if not ok:
+        return f"The configured gem5 source is not a Git checkout: {gem5_root}", False
+    actual_root = Path(top).resolve()
+    current_branch = repository_current_branch(actual_root)
+    if current_branch is None:
+        return f"gem5 is not a Git checkout: {actual_root}", False
+    if current_branch == required_branch:
+        return None, False
+    if not location.get("writable"):
+        return (
+            f"The system-managed gem5 installation at {actual_root} is on "
+            f"branch '{current_branch}', but ASE Studio requires "
+            f"'{required_branch}'. Ask an administrator to switch the shared "
+            "checkout to the required branch."
+        ), False
+    return ensure_repository_branch(actual_root, "gem5", required_branch)
+
+
 def require_startup_repositories():
     """Select supported parent/Studio branches and validate the gem5 branch."""
     required = required_repository_branches()
@@ -4459,29 +4488,13 @@ def require_startup_repositories():
     elif not Path(location["buildDir"]).is_dir():
         problems.append(
             f"The configured gem5 build directory does not exist: {location['buildDir']}")
-    elif location["filesystemWritable"]:
-        if not location["repository"]:
-            problems.append(
-                "The configured gem5 build is not inside a Git checkout: "
-                f"{location['buildDir']}")
-        elif location["writable"]:
-            gem5_root = Path(location["repository"])
-            ok, top = git_run(["rev-parse", "--show-toplevel"], cwd=gem5_root)
-            if not ok:
-                problems.append(
-                    f"The configured gem5 source is not a Git checkout: {gem5_root}")
-            else:
-                actual_root = Path(top).resolve()
-                gem5_branch = repository_current_branch(actual_root)
-                if gem5_branch is None:
-                    problems.append(f"gem5 is not a Git checkout: {actual_root}")
-                elif gem5_branch != required["gem5"]:
-                    problems.append(
-                        f"gem5 requires branch '{required['gem5']}', "
-                        f"but '{gem5_branch}' is checked out.")
-    # Shared /opt deployments are maintained by an administrator. Students can
-    # run their gem5 binary, but startup does not inspect a read-only checkout.
-    # Writable VM/local installs take the branch-validation path above.
+    else:
+        problem, switched = ensure_configured_gem5_branch(
+            location, required["gem5"])
+        if problem:
+            problems.append(problem)
+        elif switched:
+            switched_labels.append(f"gem5 -> {required['gem5']}")
     if problems:
         detail = "\n".join(f"- {problem}" for problem in problems)
         fail(
