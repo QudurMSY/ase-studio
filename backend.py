@@ -4363,6 +4363,70 @@ def ensure_repository_branch(repository, label, required_branch):
     return None, True
 
 
+def align_studio_submodule_branch(required_branch, expected_commit=None):
+    """Attach Studio to the parent-pinned remote commit without losing work."""
+    if expected_commit is None:
+        found, expected_commit = git_run(
+            ["rev-parse", "HEAD:ase_studio"], cwd=ROOT)
+        if not found:
+            return None, False
+    remote_ref = f"origin/{required_branch}"
+    found, remote_commit = git_run(
+        ["rev-parse", "--verify", remote_ref], cwd=STUDIO_ROOT)
+    if not found or expected_commit.strip() != remote_commit.strip():
+        # The parent may intentionally lag a newer Studio release. In that
+        # case the normal updater, not submodule reattachment, decides.
+        return None, False
+
+    found, current_commit = git_run(["rev-parse", "HEAD"], cwd=STUDIO_ROOT)
+    if not found:
+        return f"ASE Studio is not a Git checkout: {STUDIO_ROOT}", False
+    current_branch = repository_current_branch(STUDIO_ROOT)
+    if (current_branch == required_branch
+            and current_commit.strip() == remote_commit.strip()):
+        return None, False
+
+    _, dirty = git_run(
+        ["status", "--porcelain", "--untracked-files=no"], cwd=STUDIO_ROOT)
+    if dirty:
+        return (
+            "ASE Studio is at the parent-pinned release, but its branch cannot "
+            "be reattached because tracked files have local changes. Commit or "
+            "stash them, then start ASE Studio again."
+        ), False
+
+    local_ref = f"refs/heads/{required_branch}"
+    local_exists, local_commit = git_run(
+        ["rev-parse", "--verify", local_ref], cwd=STUDIO_ROOT)
+    if local_exists and local_commit.strip() != remote_commit.strip():
+        compared, ahead_text = git_run(
+            ["rev-list", "--count", f"{remote_ref}..{local_ref}"],
+            cwd=STUDIO_ROOT)
+        if compared and int(ahead_text or "0") > 0:
+            short_commit = local_commit.strip()[:12]
+            backup_branch = f"backup/ase-studio-main-{short_commit}"
+            backup_exists, _ = git_run(
+                ["show-ref", "--verify", "--quiet",
+                 f"refs/heads/{backup_branch}"], cwd=STUDIO_ROOT)
+            if not backup_exists:
+                backed_up, backup_output = git_run(
+                    ["branch", backup_branch, local_commit.strip()],
+                    cwd=STUDIO_ROOT)
+                if not backed_up:
+                    return ("ASE Studio could not preserve its divergent local "
+                            f"branch before reattachment: {backup_output}"), False
+                print(f"Preserved divergent ASE Studio commits on {backup_branch}.",
+                      flush=True)
+
+    switched, switch_output = git_run(
+        ["switch", "-C", required_branch, remote_ref],
+        timeout=60, cwd=STUDIO_ROOT)
+    if not switched:
+        detail = switch_output.splitlines()[-1] if switch_output else "Git refused"
+        return f"ASE Studio could not reattach '{required_branch}': {detail}", False
+    return None, True
+
+
 def filesystem_git_checkout(path):
     """Find the checkout containing *path* without invoking Git."""
     path = Path(path).resolve()
@@ -4470,15 +4534,26 @@ def require_startup_repositories():
     problems = []
     switched_labels = []
 
-    for repository, label, branch in (
-            (ROOT, "Simulator", required["simulator"]),
-            (STUDIO_ROOT, "ASE Studio", required["studio"])):
+    problem, switched = ensure_repository_branch(
+        ROOT, "Simulator", required["simulator"])
+    if problem:
+        problems.append(problem)
+    elif switched:
+        switched_labels.append(f"Simulator -> {required['simulator']}")
+
+    studio_problem, studio_aligned = align_studio_submodule_branch(
+        required["studio"])
+    if studio_problem:
+        problems.append(studio_problem)
+    elif studio_aligned:
+        switched_labels.append(f"ASE Studio -> {required['studio']}")
+    else:
         problem, switched = ensure_repository_branch(
-            repository, label, branch)
+            STUDIO_ROOT, "ASE Studio", required["studio"])
         if problem:
             problems.append(problem)
         elif switched:
-            switched_labels.append(f"{label} -> {branch}")
+            switched_labels.append(f"ASE Studio -> {required['studio']}")
 
     values = setup_environment()
     values.update(environment_overrides())
@@ -4901,6 +4976,14 @@ def pull_update(discard_local_changes=False):
         ok = ok and submodule_ok
         if submodule_output:
             outputs.append(f"Submodule:\n{submodule_output}")
+        if submodule_ok:
+            branch_problem, branch_aligned = align_studio_submodule_branch(
+                required_repository_branches()["studio"])
+            if branch_problem:
+                ok = False
+                outputs.append(f"ASE Studio:\n{branch_problem}")
+            elif branch_aligned:
+                outputs.append("ASE Studio:\nReattached the local branch to the parent-pinned release.")
     studio = repository_update_status(STUDIO_ROOT, "ASE Studio", refresh=True)
     if ok and studio["available"]:
         command = (["pull", "--ff-only", "origin", studio["branch"]]
