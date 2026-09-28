@@ -3407,21 +3407,28 @@ def schedule_direct_in_order_pipeline(data, configuration):
         if previous is not None:
             decode = max(decode, previous["E"])
 
-        # Without forwarding, all operands must be read from the register file
-        # in Decode.  A branch also consumes its operands there in the course's
-        # five-stage model, even when forwarding is enabled.
-        decode_sources = (info["sources"] if (not forwarding or info["control"])
-                          else [])
-        for register in decode_sources:
-            producer = latest_producer.get(register)
-            if producer is None:
-                continue
-            ready = (producer["W"] if not forwarding
-                     else forwarded_ready(producer))
-            decode = max(decode, ready)
+        # Decode happens before a RAW hazard is resolved.  The instruction is
+        # already resident in D while it waits for the register file, so a
+        # no-forwarding dependency must be drawn as D -> S ... -> E rather
+        # than F -> S ... -> D.  Branch operands are the exception in the
+        # forwarding model used by the course: the branch consumes them while
+        # it is held in Decode.
+        if forwarding and info["control"]:
+            for register in info["sources"]:
+                producer = latest_producer.get(register)
+                if producer is not None:
+                    decode = max(decode, forwarded_ready(producer))
 
         execute = max(decode + 1, previous_issue + 1,
                       unit_ready[info["unit"]])
+        if not forwarding:
+            # Register-file operands become usable after the producer's
+            # Writeback cycle.  Keep the original Decode marker and express
+            # this wait in the intervening S cells.
+            for register in info["sources"]:
+                producer = latest_producer.get(register)
+                if producer is not None:
+                    execute = max(execute, producer["W"] + 1)
         if previous is not None and not out_of_order_execution:
             # With dynamic execution disabled, a younger instruction cannot
             # begin until the older instruction has left its functional unit.

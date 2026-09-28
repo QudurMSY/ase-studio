@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 Behnam Farnaghinejad <behnam.farnaghinejad@polito.it>
+# SPDX-License-Identifier: GPL-2.0-only
+
+name: Pipeline regressions
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  golden-pipelines:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out ASE Studio
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Verify golden exam pipelines
+        run: python3 -m unittest tests.test_pipeline_regressions -v

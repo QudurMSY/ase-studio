@@ -1,0 +1,41 @@
+
+main.elf:     file format elf32-littleriscv
+
+
+Disassembly of section .text:
+
+00010094 <_start>:
+   10094:	00a00313          	li	t1,10
+   10098:	00001097          	auipc	ra,0x1
+   1009c:	07408093          	addi	ra,ra,116 # 1110c <__DATA_BEGIN__>
+   100a0:	00001117          	auipc	sp,0x1
+   100a4:	0b410113          	addi	sp,sp,180 # 11154 <V2>
+   100a8:	00001197          	auipc	gp,0x1
+   100ac:	0f418193          	addi	gp,gp,244 # 1119c <V3>
+   100b0:	00001217          	auipc	tp,0x1
+   100b4:	13420213          	addi	tp,tp,308 # 111e4 <V4>
+   100b8:	00001297          	auipc	t0,0x1
+   100bc:	17428293          	addi	t0,t0,372 # 1122c <V5>
+
+000100c0 <loop>:
+   100c0:	0000b087          	fld	ft1,0(ra)
+   100c4:	00013107          	fld	ft2,0(sp)
+   100c8:	1a20f253          	fdiv.d	ft4,ft1,ft2
+   100cc:	00423027          	fsd	ft4,0(tp) # 0 <_start-0x10094>
+   100d0:	0001b187          	fld	ft3,0(gp) # 1190c <__global_pointer$>
+   100d4:	1a11f353          	fdiv.d	ft6,ft3,ft1
+   100d8:	024373d3          	fadd.d	ft7,ft6,ft4
+   100dc:	0072b027          	fsd	ft7,0(t0)
+   100e0:	00808093          	addi	ra,ra,8
+   100e4:	00810113          	addi	sp,sp,8
+   100e8:	00818193          	addi	gp,gp,8 # 11914 <__global_pointer$+0x8>
+   100ec:	00820213          	addi	tp,tp,8 # 8 <_start-0x1008c>
+   100f0:	00828293          	addi	t0,t0,8
+   100f4:	fff30313          	addi	t1,t1,-1
+   100f8:	fc0314e3          	bnez	t1,100c0 <loop>
+   100fc:	00000013          	nop
+
+00010100 <End>:
+   10100:	00000513          	li	a0,0
+   10104:	05d00893          	li	a7,93
+   10108:	00000073          	ecall
