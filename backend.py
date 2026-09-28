@@ -4267,7 +4267,7 @@ def git_run(args, timeout=20, cwd=ROOT):
 
 
 def required_repository_branches():
-    """Load the deployment branches required for a supported Studio run."""
+    """Load release branches, including configs written before `studio`."""
     try:
         values = json.loads(REQUIRED_BRANCHES_FILE.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -4276,9 +4276,30 @@ def required_repository_branches():
         fail(f"Required-branch configuration cannot be read: {error}", 500)
     if not isinstance(values, dict):
         fail("Required-branch configuration must be a JSON object.", 500)
+
+    # A checkout on a retired parent branch contains that branch's old config.
+    # Prefer the cached configuration on origin's default branch so startup can
+    # migrate the parent without requiring a manual checkout. This remains
+    # offline-friendly because it reads an existing remote-tracking ref.
+    current_branch = repository_current_branch(ROOT)
+    ok, remote_head = git_run(
+        ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=ROOT)
+    if ok and remote_head and current_branch != remote_head.removeprefix("origin/"):
+        found, remote_text = git_run(
+            ["show", f"{remote_head}:{REQUIRED_BRANCHES_FILE.name}"], cwd=ROOT)
+        if found:
+            try:
+                remote_values = json.loads(remote_text)
+            except json.JSONDecodeError:
+                remote_values = None
+            if isinstance(remote_values, dict):
+                values = remote_values
+
     branches = {}
     for key in ("simulator", "studio", "gem5"):
-        branch = values.get(key)
+        # `studio` was added after the first public branch-config format. Old
+        # installations therefore use the public ASE Studio default branch.
+        branch = values.get(key, "main" if key == "studio" else None)
         if (not isinstance(branch, str) or not branch.strip()
                 or branch.startswith("-") or "\0" in branch
                 or any(character.isspace() for character in branch)):
