@@ -4342,10 +4342,21 @@ def ensure_repository_branch(repository, label, required_branch):
         # A single-branch clone may have the remote ref without a matching
         # remote fetch rule, so create from the explicit ref without --track.
         # ASE Studio's updater always names origin and the branch explicitly.
-        command = ["switch", "-c", required_branch,
-                   f"origin/{required_branch}"]
+        command = [
+            "switch",
+            "--discard-changes",
+            "--no-recurse-submodules",
+            "-c",
+            required_branch,
+            f"origin/{required_branch}",
+        ]
     else:
-        command = ["switch", required_branch]
+        command = [
+            "switch",
+            "--no-recurse-submodules",
+            "--discard-changes",
+            required_branch,
+        ]
 
     switched, switch_output = git_run(command, timeout=60, cwd=repository)
     if not switched:
