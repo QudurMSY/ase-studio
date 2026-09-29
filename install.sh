@@ -15,28 +15,32 @@ install_system_dependencies() {
   fi
   # shellcheck disable=SC1091
   source /etc/os-release
-  case "${ID:-}" in
-    ubuntu|debian|linuxmint|pop)
-      sudo apt-get update
-      sudo apt-get install -y python3 python3-gi gir1.2-gtk-3.0 \
-        gir1.2-webkit2-4.1 desktop-file-utils xdg-user-dirs
-      ;;
-    fedora)
-      local manager="dnf"
-      command -v dnf5 >/dev/null 2>&1 && manager="dnf5"
-      sudo "$manager" install -y python3 python3-gobject gtk3 webkit2gtk4.1 \
-        desktop-file-utils xdg-user-dirs
-      ;;
-    arch|manjaro)
-      sudo pacman -Syu --needed --noconfirm python python-gobject gtk3 \
-        webkit2gtk-4.1 desktop-file-utils xdg-user-dirs
-      ;;
-    *)
-      echo "Unsupported Linux distribution: ${ID:-unknown}." >&2
-      echo "Install Python 3, PyGObject, GTK 3, and WebKitGTK 4.1, then run this installer again." >&2
-      return 1
-      ;;
-  esac
+  local candidate
+  # ID_LIKE lets derivatives (CachyOS, EndeavourOS, Kubuntu, ...) map to their base.
+  for candidate in ${ID:-} ${ID_LIKE:-}; do
+    case "$candidate" in
+      ubuntu|debian|linuxmint|pop)
+        sudo apt-get update
+        sudo apt-get install -y python3 python3-gi gir1.2-gtk-3.0 \
+          gir1.2-webkit2-4.1 desktop-file-utils xdg-user-dirs
+        ;;
+      fedora)
+        local manager="dnf"
+        command -v dnf5 >/dev/null 2>&1 && manager="dnf5"
+        sudo "$manager" install -y python3 python3-gobject gtk3 webkit2gtk4.1 \
+          desktop-file-utils xdg-user-dirs
+        ;;
+      arch|manjaro)
+        sudo pacman -Syu --needed --noconfirm python python-gobject gtk3 \
+          webkit2gtk-4.1 desktop-file-utils xdg-user-dirs
+        ;;
+      *) continue ;;
+    esac
+    return 0
+  done
+  echo "Unsupported Linux distribution: ${ID:-unknown}." >&2
+  echo "Install Python 3, PyGObject, GTK 3, and WebKitGTK 4.1, then run this installer again." >&2
+  return 1
 }
 
 if ! python3 -c 'import gi; gi.require_version("Gtk", "3.0"); gi.require_version("WebKit2", "4.1")' 2>/dev/null; then
