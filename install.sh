@@ -17,12 +17,9 @@ install_system_dependencies() {
   source /etc/os-release
   local distro="${ID:-}"
   # Arch derivatives (CachyOS, EndeavourOS, ...) can use the Arch packages.
-  # Other ID_LIKE families are not mapped: e.g. RHEL clones report
-  # ID_LIKE="rhel centos fedora" but do not ship the Fedora package set.
-  case "$distro" in
-    ubuntu|debian|linuxmint|pop|fedora|arch|manjaro) ;;
-    *) [[ " ${ID_LIKE:-} " == *" arch "* ]] && distro="arch" ;;
-  esac
+  if [[ " ${ID_LIKE:-} " == *" arch "* ]]; then
+    distro="arch"
+  fi
   case "$distro" in
     ubuntu|debian|linuxmint|pop)
       sudo apt-get update
