@@ -158,6 +158,37 @@ function editorViewport() {
   return area ? {top: area.scrollTop, left: area.scrollLeft} : null;
 }
 
+function editorCaretRect() {
+  const editor = $("#body");
+  const head = editor.value.slice(0, editor.selectionEnd);
+  const lineNumber = head.split("\n").length;
+  const sourceLine = document.querySelector(`#highlight .source-line[data-line="${lineNumber}"]`);
+  if (!sourceLine) return null;
+  let remaining = head.length - (head.lastIndexOf("\n") + 1);
+  const walker = document.createTreeWalker(sourceLine, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (remaining <= node.length) {
+      const range = document.createRange();
+      range.setStart(node, remaining);
+      range.collapse(true);
+      return range.getClientRects()[0] || sourceLine.getBoundingClientRect();
+    }
+    remaining -= node.length;
+  }
+  return sourceLine.getBoundingClientRect();
+}
+
+function revealEditorCaret() {
+  const area = document.querySelector(".editor-area");
+  if (!area || document.activeElement !== $("#body")) return;
+  const caret = editorCaretRect();
+  if (!caret) return;
+  const view = area.getBoundingClientRect();
+  if (caret.bottom > view.bottom) area.scrollTop += caret.bottom - view.bottom + 6;
+  else if (caret.top < view.top) area.scrollTop -= view.top - caret.top + 6;
+}
+
 function restoreEditorViewport(viewport) {
   if (!viewport) return;
   const restore = () => {
@@ -165,6 +196,7 @@ function restoreEditorViewport(viewport) {
     if (!area) return;
     area.scrollTop = viewport.top;
     area.scrollLeft = viewport.left;
+    revealEditorCaret();
   };
   restore();
   requestAnimationFrame(() => {
@@ -1076,6 +1108,17 @@ function protectedRanges(text) {
   return ranges;
 }
 
+function syncEditorHeight() {
+  // Wrapped lines take several rows, so measure the rendered source instead
+  // of multiplying the line count by the row height.
+  const highlight = $("#highlight");
+  const lastLine = highlight.lastElementChild;
+  if (!lastLine) return;
+  const contentHeight = lastLine.getBoundingClientRect().bottom
+    - highlight.getBoundingClientRect().top + 10;
+  $("#body").style.height = Math.max(300, Math.ceil(contentHeight)) + "px";
+}
+
 function syncEditor() {
   const editorArea = document.querySelector(".editor-area");
   const savedScrollTop = editorArea?.scrollTop || 0;
@@ -1116,9 +1159,7 @@ function syncEditor() {
       });
     });
   }
-  const lineHeight = parseFloat(getComputedStyle(document.documentElement)
-    .getPropertyValue("--editor-line-height")) || 23;
-  $("#body").style.height = Math.max(300, lines.length * lineHeight + 20) + "px";
+  syncEditorHeight();
   if (editorArea) {
     editorArea.scrollTop = savedScrollTop;
     editorArea.scrollLeft = savedScrollLeft;
@@ -3481,6 +3522,16 @@ document.addEventListener("keydown", event => {
 window.addEventListener("resize", closeChangeContextMenu);
 document.querySelector(".editor-area").addEventListener("scroll", positionOpcodePopup);
 window.addEventListener("resize", positionOpcodePopup);
+if ("ResizeObserver" in window) {
+  // Tiling the window or dragging a panel rewraps the source without an edit.
+  const editorWrap = document.querySelector(".editor-wrap");
+  let editorWrapWidth = 0;
+  new ResizeObserver(() => {
+    if (!editorWrap.clientWidth || editorWrap.clientWidth === editorWrapWidth) return;
+    editorWrapWidth = editorWrap.clientWidth;
+    window.requestAnimationFrame(syncEditorHeight);
+  }).observe(editorWrap);
+}
 $("#memory-symbol-form").onsubmit = event => {
   event.preventDefault();
   addMemoryWatch($("#memory-symbol").value);

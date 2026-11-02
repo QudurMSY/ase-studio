@@ -89,11 +89,12 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: v
 .project.selected { background: #e8f1ff; color: #0759b3; font-weight: 600; outline: 2px solid var(--blue); }
 
 #work { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #fff; overflow: hidden; }
-#editor-toolbar { flex: 0 0 40px; border-bottom: 1px solid var(--line); padding: 5px 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; color: var(--muted); }
-.editor-identity { min-width: 0; display: flex; align-items: center; gap: 9px; }
+#editor-toolbar { flex: 0 0 auto; min-height: 40px; border-bottom: 1px solid var(--line); padding: 5px 12px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 5px 12px; color: var(--muted); }
+.editor-identity { flex: 1 1 340px; min-width: 0; display: flex; align-items: center; gap: 9px; }
+#project-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #open-with, #rename, #save { flex: none; padding: 4px 9px; }
 #source-name { min-width: 0; padding-left: 9px; border-left: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.editor-tools { flex: none; display: flex; align-items: center; gap: 10px; }
+.editor-tools { flex: 0 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; }
 .editor-font-control { display: flex; align-items: center; gap: 5px; font-size: 11px; white-space: nowrap; }
 .scaffold-protection-control { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; white-space: nowrap; cursor: pointer; }
 .scaffold-protection-control input { margin: 0; }
@@ -113,9 +114,9 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: v
 .diagnostic-item.note { color: #334155; }
 .diagnostic-location { color: inherit; font: 600 11px ui-monospace, monospace; white-space: nowrap; }
 .diagnostic-message { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.editor-area { min-height: 0; overflow: auto; overflow-anchor: none; font: var(--editor-font-size)/var(--editor-line-height) "DejaVu Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-ligatures: none; scroll-behavior: smooth; }
+.editor-area { min-height: 0; overflow: auto; overflow-anchor: none; scrollbar-gutter: stable; font: var(--editor-font-size)/var(--editor-line-height) "DejaVu Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-ligatures: none; scroll-behavior: smooth; }
 .editor-wrap { position: relative; min-height: 300px; background: #fff; }
-.editor-wrap textarea, .editor-wrap pre { margin: 0; border: 0; padding: 10px 14px 10px 55px; width: 100%; min-height: 100%; font: inherit; line-height: var(--editor-line-height); letter-spacing: 0; word-spacing: 0; tab-size: 4; white-space: pre-wrap; overflow-wrap: normal; overflow: hidden; }
+.editor-wrap textarea, .editor-wrap pre { margin: 0; border: 0; padding: 10px 14px 10px 55px; width: 100%; min-height: 100%; font: inherit; line-height: var(--editor-line-height); letter-spacing: 0; word-spacing: 0; tab-size: 4; white-space: pre-wrap; overflow-wrap: break-word; overflow: hidden; }
 .editor-wrap textarea { position: relative; resize: none; color: transparent; -webkit-text-fill-color: transparent; background: transparent; caret-color: #172235; z-index: 2; outline: 0; }
 .editor-wrap pre { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
 .source-line { position: relative; display: block; min-height: var(--editor-line-height); margin-right: -14px; padding-right: 14px; }
@@ -460,6 +461,10 @@ dialog::backdrop { background: #0f172a73; }
 .about-partners img { width: 88%; height: 79px; object-fit: contain; }
 .about-content .logo-dark { display: none; }
 .about-content > small { color: var(--muted); }
+
+@media (max-width: 1100px) {
+  #search { width: 150px; }
+}
 
 @media (max-width: 700px) {
   header { grid-template-columns: 135px minmax(0, 1fr); }
